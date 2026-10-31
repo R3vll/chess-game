@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Chess</title>
 <style>
+:root {
+  --np-bg: #16213e; --np-border: #2d2d44; --np-radius: 8px; --np-radius-sm: 4px;
+  --np-font-ui: 'Segoe UI', Arial, sans-serif; --np-font-mono: ui-monospace, Menlo, monospace;
+  --np-text: #eee; --np-text-muted: #aab; --np-text-dim: #888;
+  --np-accent: #5596F2; --np-accent-subtle: rgba(85,150,242,0.15);
+  --np-transition: 0.15s ease; --np-scrollbar-thumb: #2d2d44;
+  --np-surface: #16213e; --np-surface-hover: #1a2a4a; --np-surface-active: #24365e;
+  --np-highlight: rgba(85,150,242,0.2); --np-highlight-border: #5596F2;
+  --np-white-move: #eee; --np-black-move: #aab;
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   background: #1a1a2e;
@@ -469,6 +479,10 @@ body {
 .mode-buttons .btn { margin-top: 0; flex: 1; font-size: 24px; padding: 10px; }
 .mode-buttons .btn.active-mode { background: #1a6f3a; border-color: #2ea44f; }
 .hidden { display: none; }
+.promo-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.promo-modal.hidden { display: none; }
+.promo-box { background: #16213e; padding: 20px; border-radius: 8px; text-align: center; }
+.promo-box button { font-size: 36px; margin: 4px; padding: 6px 12px; cursor: pointer; }
 .rank-label {
   position: absolute; top: 2px; left: 3px;
   font-size: 11px; font-weight: 700; pointer-events: none;
@@ -490,6 +504,7 @@ body {
 <div class="container">
   <div class="board-container">
     <div class="board" id="board"></div>
+<div class="promo-modal hidden" id="promoModal"><div class="promo-box"><div style="margin-bottom:10px">Promote to:</div><button data-promo="Q" title="Queen">♕</button><button data-promo="R" title="Rook">♖</button><button data-promo="B" title="Bishop">♗</button><button data-promo="N" title="Knight">♘</button><button data-promo="" title="Cancel" style="font-size:16px">Cancel</button></div></div>
   </div>
   <div class="sidebar">
     <!-- Status -->
@@ -588,6 +603,9 @@ class Chess {
     this.stateHistory = [];
     this.kingPos = { w: [7, 4], b: [0, 4] };
     this.uciHistory = [];
+    this.halfmoveClock = 0;
+    this.drawReason = null;
+    this.stateHistory.push(this.positionKey());
 
     // ── Snapshot system for navigation ──
     this.snapshots = [];
@@ -632,11 +650,43 @@ class Chess {
     return null;
   }
 
+  positionKey() {
+    const rows = this.board.map(row => row.map(cell => cell ? cell.color + cell.type : '--').join('')).join('/');
+    const cr = Object.entries(this.castlingRights).filter(([, v]) => v).map(([k]) => k).join('') || '-';
+    const ep = this.enPassant ? FILES[this.enPassant[1]] + (8 - this.enPassant[0]) : '-';
+    return rows + ' ' + this.turn + ' ' + cr + ' ' + ep;
+  }
+
+  isInsufficientMaterial() {
+    const pieces = [];
+    for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+      const p = this.board[r][c];
+      if (p && p.type !== 'K') pieces.push({ ...p, r, c });
+    }
+    if (pieces.length === 0) return true;
+    if (pieces.some(p => p.type === 'P' || p.type === 'R' || p.type === 'Q')) return false;
+    if (pieces.length === 1) return true;
+    if (pieces.every(p => p.type === 'B')) {
+      const colours = new Set(pieces.map(p => (p.r + p.c) % 2));
+      return colours.size === 1;
+    }
+    return pieces.length === 2 && pieces.every(p => p.type === 'B' || p.type === 'N') &&
+      pieces[0].color !== pieces[1].color;
+  }
+
   isUnderAttack(r, c, byColor) {
     for (let row = 0; row < 8; row++)
       for (let col = 0; col < 8; col++) {
         const p = this.board[row][col];
         if (!p || p.color !== byColor) continue;
+        // Pawns attack diagonally even onto empty squares; rawMoves only
+        // lists diagonal pawn moves onto occupied squares, so handle them
+        // separately or castling through a pawn attack would be allowed.
+        if (p.type === 'P') {
+          const dir = p.color === 'w' ? -1 : 1;
+          if (row + dir === r && Math.abs(col - c) === 1) return true;
+          continue;
+        }
         const moves = this.rawMoves(row, col, true);
         if (moves.some(m => m[0] === r && m[1] === c)) return true;
       }
@@ -820,7 +870,7 @@ class Chess {
     return false;
   }
 
-  makeMove(r, c, tr, tc, flag) {
+  makeMove(r, c, tr, tc, flag, promo) {
     const p = this.board[r][c];
     if (!p) return false;
 
@@ -862,8 +912,9 @@ class Chess {
       this.board[tr][tc] = p;
     }
 
-    if (p.type === 'P' && (tr === 0 || tr === 7)) {
-      this.board[tr][tc] = { type: 'Q', color: p.color };
+    const promoPiece = (p.type === 'P' && (tr === 0 || tr === 7)) ? (promo || 'Q') : null;
+    if (promoPiece) {
+      this.board[tr][tc] = { type: promoPiece, color: p.color };
     }
 
     if (p.type === 'K') {
@@ -883,17 +934,19 @@ class Chess {
 
     if (p.type === 'K') this.kingPos[p.color] = [tr, tc];
 
-    const moveStr = this.formatMove(r, c, tr, tc, p, flag, wasCapture);
+    const moveStr = this.formatMove(r, c, tr, tc, p, flag, wasCapture, promoPiece);
     this.moveHistory.push(moveStr);
     const uci = FILES[c] + (8 - r) + FILES[tc] + (8 - tr);
-    if (p.type === 'P' && (tr === 0 || tr === 7)) {
-      this.uciHistory.push(uci + 'q');
+    if (promoPiece) {
+      this.uciHistory.push(uci + promoPiece.toLowerCase());
     } else {
       this.uciHistory.push(uci);
     }
+    this.halfmoveClock = (p.type === 'P' || wasCapture) ? 0 : this.halfmoveClock + 1;
     this.lastMove = [[r, c], [tr, tc]];
 
     this.turn = this.turn === 'w' ? 'b' : 'w';
+    this.stateHistory.push(this.positionKey());
 
     const inCheck = this.isInCheck(this.turn);
     const hasLegal = this.hasLegalMoves(this.turn);
@@ -902,6 +955,12 @@ class Chess {
       this.gameOver = inCheck ? 'checkmate' : 'stalemate';
     } else if (inCheck) {
       this.gameOver = 'check';
+    } else if (this.isInsufficientMaterial()) {
+      this.gameOver = 'draw'; this.drawReason = 'Draw by insufficient material.';
+    } else if (this.halfmoveClock >= 100) {
+      this.gameOver = 'draw'; this.drawReason = 'Draw by the fifty-move rule.';
+    } else if (this.stateHistory.filter(k => k === this.stateHistory[this.stateHistory.length - 1]).length >= 3) {
+      this.gameOver = 'draw'; this.drawReason = 'Draw by threefold repetition.';
     } else {
       this.gameOver = false;
     }
@@ -926,24 +985,46 @@ class Chess {
     this.isReviewing = false;
   }
 
-  formatMove(r, c, tr, tc, p, flag, wasCapture) {
+  checkSuffix(moverColor) {
+    const opp = moverColor === 'w' ? 'b' : 'w';
+    if (!this.isInCheck(opp)) return '';
+    return this.hasLegalMoves(opp) ? '+' : '#';
+  }
+
+  formatMove(r, c, tr, tc, p, flag, wasCapture, promoPiece) {
+    const suffix = this.checkSuffix(p.color);
     if (flag && flag.startsWith('castle')) {
-      return flag === 'castle-k' ? 'O-O' : 'O-O-O';
+      return (flag === 'castle-k' ? 'O-O' : 'O-O-O') + suffix;
     }
-    const pieceChar = p.type === 'P' ? '' : p.type;
     const dst = FILES[tc] + (8 - tr);
     if (p.type === 'P') {
-      if (wasCapture) return FILES[c] + 'x' + dst;
-      return dst;
+      const base = wasCapture ? FILES[c] + 'x' + dst : dst;
+      return promoPiece ? base + '=' + promoPiece + suffix : base + suffix;
     }
-    return pieceChar + (wasCapture ? 'x' : '') + dst;
+    let disamb = '';
+    for (let rr = 0; rr < 8; rr++) for (let cc = 0; cc < 8; cc++) {
+      if (rr === r && cc === c) continue;
+      const q = this.board[rr][cc];
+      if (q && q.type === p.type && q.color === p.color) {
+        const mover = this.board[tr][tc];
+        this.board[tr][tc] = null; this.board[r][c] = p;
+        const can = this.legalMoves(rr, cc).some(m => m[0] === tr && m[1] === tc);
+        this.board[r][c] = null; this.board[tr][tc] = mover;
+        if (can) {
+          if (cc !== c) disamb = FILES[c];
+          else if (rr !== r) disamb = String(8 - r);
+          else disamb = FILES[c] + (8 - r);
+        }
+      }
+    }
+    return p.type + disamb + (wasCapture ? 'x' : '') + dst + suffix;
   }
 
   getStatusText() {
     const turnName = this.turn === 'w' ? 'White' : 'Black';
     if (this.gameOver === 'checkmate') return `Checkmate! ${turnName === 'White' ? 'Black' : 'White'} wins!`;
     if (this.gameOver === 'stalemate') return 'Stalemate! Draw.';
-    if (this.gameOver === 'draw') return 'Draw by agreement.';
+    if (this.gameOver === 'draw') return this.drawReason || 'Draw by agreement.';
     if (this.gameOver === 'resigned') return `${turnName === 'White' ? 'Black' : 'White'} wins by resignation.`;
     if (this.gameOver === 'check') return `${turnName} is in check!`;
     return `${turnName}'s turn`;
@@ -986,6 +1067,7 @@ function setPlayerColor(color) {
 let stockfishWorker = null;
 let stockfishReady = false;
 let stockfishPending = false;
+let stockfishRetryCount = 0;
 
 function initStockfish() {
   if (stockfishWorker) {
@@ -1019,7 +1101,8 @@ function initStockfish() {
               const legal = game.legalMoves(fromRank, fromFile);
               const move = legal.find(function(m) { return m[0] === toRank && m[1] === toFile; });
               if (move) {
-                game.makeMove(fromRank, fromFile, toRank, toFile, move[2]);
+                const promo = uciMove[4] ? uciMove[4].toUpperCase() : undefined;
+                game.makeMove(fromRank, fromFile, toRank, toFile, move[2], promo);
                 game.selected = null;
                 render();
                 if (playerColor && game.turn !== playerColor && !game.gameOver) {
@@ -1035,6 +1118,8 @@ function initStockfish() {
     stockfishWorker.onerror = function(e) {
       console.error('Stockfish worker error:', e);
       if (blobUrl) URL.revokeObjectURL(blobUrl);
+      if (gameMode !== 'bot' || stockfishRetryCount >= 2) return;
+      stockfishRetryCount++;
       setTimeout(initStockfish, 2000);
     };
 
@@ -1088,16 +1173,37 @@ function flipBoard() {
 }
 
 function offerDraw() {
+  if (game.isReviewing) return;
+  if (game.gameOver && game.gameOver !== 'check') return;
+  if (gameMode === 'friend' && !confirm('Accept this draw?')) return;
   game.gameOver = 'draw';
+  game.drawReason = 'Draw by agreement.';
   game.selected = null;
   render();
 }
 
 function resign() {
+  if (game.isReviewing) return;
+  if (game.gameOver && game.gameOver !== 'check') return;
   game.gameOver = 'resigned';
   game.selected = null;
   render();
 }
+
+let pendingPromoMove = null;
+document.getElementById('promoModal').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-promo]');
+  if (!btn || !pendingPromoMove) return;
+  const promo = btn.dataset.promo;
+  const mv = pendingPromoMove;
+  pendingPromoMove = null;
+  document.getElementById('promoModal').classList.add('hidden');
+  if (!promo) { game.selected = null; render(); return; }
+  game.makeMove(mv.sr, mv.sc, mv.r, mv.c, mv.flag, promo);
+  game.selected = null;
+  render();
+  if (playerColor && game.turn !== playerColor) makeAIMove();
+});
 
 const boardEl = document.getElementById('board');
 
@@ -1197,7 +1303,11 @@ function render() {
         const span = document.createElement('span');
         span.className = 'piece piece-' + (piece.color === 'w' ? 'white' : 'black');
         span.style.backgroundImage = `url('https://images.chesscomfiles.com/chess-themes/pieces/cases/150/${piece.color}${piece.type.toLowerCase()}.png')`;
-        span.textContent = '';
+        // Unicode fallback if the piece image fails to load.
+        span.textContent = PIECE_UNICODE[piece.color + piece.type];
+        span.style.textAlign = 'center';
+        span.style.lineHeight = '70px';
+        span.style.fontSize = '44px';
         span.draggable = !ds.isReviewing && piece.color === game.turn && (!playerColor || piece.color === playerColor);
         span.addEventListener('dragstart', (e) => {
           if (ds.isReviewing || piece.color !== game.turn) { e.preventDefault(); return; }
@@ -1257,7 +1367,7 @@ function render() {
   updateNavControls();
 
   const hasStarted = game.moveHistory.length > 0;
-  const gameActive = hasStarted && !game.gameOver;
+  const gameActive = hasStarted && (!game.gameOver || game.gameOver === 'check');
   const inBotMode = gameMode === 'bot';
   document.getElementById('sideButtons').classList.toggle('hidden', !inBotMode || hasStarted || !!playerColor);
   document.getElementById('drawBtn').classList.toggle('hidden', !gameActive);
@@ -1503,6 +1613,12 @@ function handleClick(r, c, e) {
     const legal = game.legalMoves(sr, sc);
     const move = legal.find(m => m[0] === r && m[1] === c);
     if (move) {
+      const moving = game.board[sr][sc];
+      if (moving && moving.type === 'P' && (r === 0 || r === 7)) {
+        pendingPromoMove = { sr, sc, r, c, flag: move[2] };
+        document.getElementById('promoModal').classList.remove('hidden');
+        return;
+      }
       game.makeMove(sr, sc, r, c, move[2]);
       game.selected = null;
       render();
