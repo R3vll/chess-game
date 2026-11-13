@@ -39,15 +39,32 @@ body {
   background-position: center;
   cursor: grab;
   user-select: none;
+  touch-action: none;
+  -webkit-user-drag: none;
   /* Dark rim so white pieces stay legible on the pale squares */
   filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.85)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
 }
 .piece:active { cursor: grabbing; }
+.piece.drag-source { opacity: 0.25; }
+.drag-ghost {
+  position: fixed;
+  z-index: 9999;
+  margin: 0;
+  pointer-events: none;
+  background-size: 80%;
+  background-repeat: no-repeat;
+  background-position: center;
+  transform: translate(-50%, -50%) scale(1.06);
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.85)) drop-shadow(0 6px 10px rgba(0, 0, 0, 0.5));
+}
+body.dragging-piece { cursor: grabbing; }
+body.dragging-piece .square, body.dragging-piece .piece { cursor: grabbing; }
 .piece-white { }
 .piece-black { }
 .light .piece-white { }
 .dark .piece-white { }
 .square.drag-over { background: #a8d4f0 !important; }
+.square.drag-over-bad { box-shadow: inset 0 0 0 3px rgba(224, 64, 64, 0.55); }
 .sidebar {
   background: #16213e; padding: 20px; border-radius: 8px;
   min-width: 260px; max-width: 300px;
@@ -1150,6 +1167,124 @@ function findKingInBoard(board, color) {
   return null;
 }
 
+// ===== PIECE DRAG (pointer events) =====
+let dragState = null;
+let suppressClickUntil = 0;
+
+function squareUnderPointer(x, y) {
+  const el = document.elementFromPoint(x, y);
+  return el && el.closest ? el.closest('#board .square') : null;
+}
+
+function beginPieceDrag(e, span, r, c) {
+  if (dragState || e.button !== 0) return;
+  if (game.isReviewing) return;
+  if (playerColor && game.turn !== playerColor) return;
+  if (game.gameOver && game.gameOver !== 'check') return;
+  const piece = game.board[r][c];
+  if (!piece || piece.color !== game.turn) return;
+
+  dragState = {
+    from: [r, c],
+    span: span,
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    active: false,
+    ghost: null,
+    hover: null,
+    legal: new Map(),
+  };
+  try { span.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+  window.addEventListener('pointermove', onPiecePointerMove);
+  window.addEventListener('pointerup', onPiecePointerUp);
+  window.addEventListener('pointercancel', onPiecePointerCancel);
+}
+
+function onPiecePointerMove(e) {
+  const s = dragState;
+  if (!s || e.pointerId !== s.pointerId) return;
+
+  if (!s.active) {
+    if (Math.hypot(e.clientX - s.startX, e.clientY - s.startY) < 4) return;
+    s.active = true;
+    s.legal = new Map(game.legalMoves(s.from[0], s.from[1]).map(m => [m[0] * 8 + m[1], m[2]]));
+    const rect = s.span.getBoundingClientRect();
+    const ghost = document.createElement('div');
+    ghost.className = 'drag-ghost';
+    ghost.style.width = rect.width + 'px';
+    ghost.style.height = rect.height + 'px';
+    ghost.style.backgroundImage = s.span.style.backgroundImage;
+    document.body.appendChild(ghost);
+    s.ghost = ghost;
+    s.span.classList.add('drag-source');
+    document.body.classList.add('dragging-piece');
+  }
+
+  if (e.cancelable) e.preventDefault();
+  s.ghost.style.left = e.clientX + 'px';
+  s.ghost.style.top = e.clientY + 'px';
+
+  const sq = squareUnderPointer(e.clientX, e.clientY);
+  if (sq === s.hover) return;
+  if (s.hover) s.hover.classList.remove('drag-over', 'drag-over-bad');
+  s.hover = sq;
+  if (sq) {
+    const key = Number(sq.dataset.row) * 8 + Number(sq.dataset.col);
+    sq.classList.add(s.legal.has(key) ? 'drag-over' : 'drag-over-bad');
+  }
+}
+
+function onPiecePointerUp(e) {
+  const s = dragState;
+  if (!s || e.pointerId !== s.pointerId) return;
+  const wasActive = s.active;
+  const sq = wasActive ? squareUnderPointer(e.clientX, e.clientY) : null;
+  endPieceDrag();
+  if (!wasActive) return; // it was a plain click; the click handler deals with it
+  suppressClickUntil = Date.now() + 350;
+  if (!sq) return; // dropped outside the board: the piece snaps back
+  tryMove(s.from[0], s.from[1], Number(sq.dataset.row), Number(sq.dataset.col));
+}
+
+function onPiecePointerCancel(e) {
+  const s = dragState;
+  if (!s || e.pointerId !== s.pointerId) return;
+  endPieceDrag();
+}
+
+function endPieceDrag() {
+  const s = dragState;
+  if (!s) return;
+  dragState = null;
+  if (s.ghost && s.ghost.parentNode) s.ghost.parentNode.removeChild(s.ghost);
+  if (s.span) s.span.classList.remove('drag-source');
+  if (s.hover) s.hover.classList.remove('drag-over', 'drag-over-bad');
+  document.body.classList.remove('dragging-piece');
+  window.removeEventListener('pointermove', onPiecePointerMove);
+  window.removeEventListener('pointerup', onPiecePointerUp);
+  window.removeEventListener('pointercancel', onPiecePointerCancel);
+}
+
+// Plays a move only when it is legal for that piece; used by both drag and click.
+function tryMove(sr, sc, tr, tc) {
+  if (game.isReviewing) return false;
+  if (playerColor && game.turn !== playerColor) return false;
+  if (game.gameOver && game.gameOver !== 'check') return false;
+  if (sr === tr && sc === tc) return false;
+  const piece = game.board[sr][sc];
+  if (!piece || piece.color !== game.turn) return false;
+  const move = game.legalMoves(sr, sc).find(m => m[0] === tr && m[1] === tc);
+  if (!move) return false;
+  game.makeMove(sr, sc, tr, tc, move[2]);
+  game.selected = null;
+  render();
+  if (playerColor && game.turn !== playerColor) {
+    makeAIMove();
+  }
+  return true;
+}
+
 function render() {
   const ds = getDisplayState();
   boardEl.innerHTML = '';
@@ -1200,38 +1335,20 @@ function render() {
         span.className = 'piece piece-' + (piece.color === 'w' ? 'white' : 'black');
         span.style.backgroundImage = `url('pieces/${piece.color}${piece.type.toLowerCase()}.png')`;
         span.textContent = '';
-        span.draggable = !ds.isReviewing && piece.color === game.turn && (!playerColor || piece.color === playerColor);
-        span.addEventListener('dragstart', (e) => {
-          if (ds.isReviewing || piece.color !== game.turn) { e.preventDefault(); return; }
-          e.dataTransfer.setData('text/plain', r + ',' + c);
-          game.selected = [r, c];
-        });
-        // FIX 1: dragend clears the orphaned game.selected that dragstart sets.
-        // Without this, a cancelled drag (Escape, dropped outside the board, etc.)
-        // leaves game.selected armed, so the very next left-click on any legal
-        // destination fires makeMove() with no prior visible piece selection.
-        span.addEventListener('dragend', () => {
-          if (game.selected) {
-            game.selected = null;
-            render();
-          }
-        });
+        // Dragging is handled with pointer events (mouse, trackpad, touch, pen),
+        // so the piece visibly follows the cursor and lands on the square it is
+        // released over. Native HTML5 drag is disabled on purpose.
+        span.addEventListener('pointerdown', (e) => beginPieceDrag(e, span, r, c));
+        span.addEventListener('dragstart', (e) => e.preventDefault());
         sq.appendChild(span);
       }
 
-      sq.addEventListener('dragover', (e) => { e.preventDefault(); sq.classList.add('drag-over'); });
-      sq.addEventListener('dragleave', () => sq.classList.remove('drag-over'));
-      sq.addEventListener('drop', (e) => {
-        e.preventDefault();
-        sq.classList.remove('drag-over');
-        // dragend fires after drop, but game.selected will already be cleared
-        // inside handleClick on a successful move, so dragend is a no-op there.
-        handleClick(r, c);
-      });
-
       sq.dataset.row = r;
       sq.dataset.col = c;
-      sq.addEventListener('click', () => handleClick(r, c));
+      sq.addEventListener('click', () => {
+        if (Date.now() < suppressClickUntil) return;
+        handleClick(r, c);
+      });
       boardEl.appendChild(sq);
     }
   }
@@ -1465,6 +1582,11 @@ document.addEventListener('keydown', (e) => {
       goToLast();
       break;
     case 'Escape':
+      if (dragState) {
+        e.preventDefault();
+        endPieceDrag();
+        break;
+      }
       if (game.isReviewing) {
         e.preventDefault();
         goToCurrent();
@@ -1502,17 +1624,7 @@ function handleClick(r, c, e) {
       render();
       return;
     }
-    const legal = game.legalMoves(sr, sc);
-    const move = legal.find(m => m[0] === r && m[1] === c);
-    if (move) {
-      game.makeMove(sr, sc, r, c, move[2]);
-      game.selected = null;
-      render();
-      if (playerColor && game.turn !== playerColor) {
-        makeAIMove();
-      }
-      return;
-    }
+    if (tryMove(sr, sc, r, c)) return;
     game.selected = null;
     render();
     return;
