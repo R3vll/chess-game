@@ -11,8 +11,8 @@ html, body {
 }
 body {
   background: #1a1a2e;
-  display: flex; justify-content: center; align-items: center;
-  min-height: 100vh; font-family: 'Segoe UI', Arial, sans-serif;
+  display: flex; justify-content: center; align-items: flex-start;
+  min-height: 100vh; padding: 10px 0; font-family: 'Segoe UI', Arial, sans-serif;
   color: #eee;
 }
 .container { display: flex; gap: 30px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
@@ -508,7 +508,8 @@ body.dragging-piece .square, body.dragging-piece .piece { cursor: grabbing; }
 .light .rank-label, .light .file-label { color: #5596F2; }
 .dark .rank-label, .dark .file-label { color: #F2F6FA; }
 @media (max-width: 700px) {
-  .board { grid-template-columns: repeat(8, 48px); grid-template-rows: repeat(8, 48px); }
+  .board { grid-template-columns: repeat(8, min(48px, 11vw)); grid-template-rows: repeat(8, min(48px, 11vw)); }
+  .board-container { max-width: 100%; }
   .square { font-size: 30px; }
   html, body { overflow: auto; }
   .sidebar { min-width: 180px; max-height: none; }
